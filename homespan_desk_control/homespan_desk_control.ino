@@ -485,7 +485,7 @@ struct SmartSliderDeskControl : Service::WindowCovering {
 // ===== MAIN SETUP =====
 void setup() {
   Serial.begin(115200);
-  delay(1000);
+  delay(2000);
   
   Serial.println("\n\n🎛️ SMART DEBOUNCED SLIDER DESK CONTROL 🏠");
   Serial.println("============================================");
@@ -531,12 +531,17 @@ void setup() {
   Serial.println("📏 Initial height: " + String(initialHeight, 1) + " cm (" + String(pulseCount) + " pulses)");
   
   // Connect to WiFi
+  delay(2000);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   Serial.print("📡 Connecting to WiFi");
+  // More robust WiFi connection
+  WiFi.persistent(true);
+  WiFi.setAutoReconnect(true);
+  delay(2000); // Give more time for WiFi to stabilize
   
   int attempts = 0;
   while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-    delay(500);
+    delay(100);
     Serial.print('.');
     attempts++;
   }
@@ -545,13 +550,32 @@ void setup() {
     Serial.println("\n✅ WiFi connected! IP: " + WiFi.localIP().toString());
   } else {
     Serial.println("\n❌ WiFi connection failed!");
+  
+    // Show failure on LCD
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("WiFi FAILED!");
+    lcd.setCursor(0, 1);
+    lcd.print("Check Router");
+    
+    // Keep showing error (don't continue setup)
+    while(true) {
+      delay(1000);
+      // Blink the display to draw attention
+      lcd.noBacklight();
+      delay(500);
+      lcd.backlight();
+      delay(500);
+    }
   }
   
+  delay(2000);
   // Initialize HomeSpan
   Serial.println("🏠 Initializing HomeSpan...");
-  homeSpan.setLogLevel(1);
+  homeSpan.setLogLevel(0);
   homeSpan.enableOTA();
   homeSpan.setPairingCode("46637726");
+  delay(2000);
   homeSpan.begin(Category::WindowCoverings, "Smart Desk");
   
   // Create HomeKit accessory
