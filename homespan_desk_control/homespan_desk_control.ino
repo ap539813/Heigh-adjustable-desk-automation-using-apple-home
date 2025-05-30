@@ -540,9 +540,12 @@ void setup() {
   delay(2000); // Give more time for WiFi to stabilize
   
   int attempts = 0;
+  lcd.clear();
+  lcd.setCursor(0, 0);
   while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-    delay(100);
+    delay(2000);
     Serial.print('.');
+    lcd.print(".");
     attempts++;
   }
   
