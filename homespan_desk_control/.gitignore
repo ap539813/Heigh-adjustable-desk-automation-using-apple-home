@@ -1,0 +1,6 @@
+# Credentials file - DO NOT commit to git
+credentials.h
+
+# IDE files
+.vscode/
+.DS_Store
