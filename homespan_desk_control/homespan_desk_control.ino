@@ -18,8 +18,8 @@
 #include <HomeSpan.h>
 
 // ===== CONFIGURATION =====
-const char* WIFI_SSID = "A-19_4G";
-const char* WIFI_PASSWORD = "lebhikhari";
+const char* WIFI_SSID = "Shraddha_ 5G";
+const char* WIFI_PASSWORD = "Password_leg@_bh!khari";
 
 // I2C pins
 const uint8_t SDA_PIN = 21;
