@@ -1,6 +1,6 @@
 /*
- * Time-of-Flight (ToF) Sensor Module
- * Handles VL53L0X distance sensor for height calibration
+ * ToF Sensor Module
+ * VL53L0X distance sensor for height calibration
  */
 
 #ifndef TOF_SENSOR_H
@@ -9,21 +9,18 @@
 #include <Arduino.h>
 #include <VL53L0X.h>
 
-class ToFSensor {
-public:
-  // Initialize the ToF sensor
-  static bool init();
+namespace ToFSensor {
+  // Initialize ToF sensor
+  bool init();
 
-  // Measure height using ToF sensor (returns height in cm, or -1 on error)
-  static float measureHeight();
+  // Measure height using ToF sensor
+  float measureHeight();
 
-  // Calibrate pulse count based on ToF measurement
-  // Returns the new calibrated pulse count
-  static int calibrate(int currentPulseCount);
+  // Calibrate pulse count using ToF measurement
+  int calibrate(int currentPulseCount);
 
-private:
-  static VL53L0X sensor;
-  static bool initialized;
-};
+  // Get ToF sensor instance
+  VL53L0X& getSensor();
+}
 
 #endif

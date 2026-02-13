@@ -11,7 +11,7 @@
 // Initialize EEPROM storage
 void initStorage();
 
-// Save current pulse count to EEPROM
+// Save pulse count to EEPROM
 void savePulseCount(int pulseCount);
 
 // Load pulse count from EEPROM

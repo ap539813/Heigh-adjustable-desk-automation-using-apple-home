@@ -1,6 +1,6 @@
 /*
  * Utility Functions
- * Height/Pulse/Percentage conversions
+ * Height/pulse conversion helpers
  */
 
 #ifndef UTILS_H
