@@ -25,6 +25,7 @@ namespace HallSensor {
 
     if (sensor1State == HIGH && sensor1LastState == LOW) {
       if (millis() - lastDebounceTime > debounceDelay) {
+        int oldPulseCount = pulseCount;
         if (sensor2State == LOW) {
           pulseCount++;
         } else {
@@ -34,11 +35,8 @@ namespace HallSensor {
 
         // Debug output during movement only
         if (state == MOVING_TO_TARGET) {
-          static unsigned long lastHallPrint = 0;
-          if (millis() - lastHallPrint > 200) { // Limit print frequency
-            Serial.println("🧲 Hall: " + String(pulseCount) + " pulses, Height: " + String(pulsesToHeight(pulseCount), 1) + " cm");
-            lastHallPrint = millis();
-          }
+          String direction = (pulseCount > oldPulseCount) ? "UP ⬆️" : "DOWN ⬇️";
+          Serial.println("🧲 Hall detected " + direction + ": " + String(oldPulseCount) + " -> " + String(pulseCount) + " pulses (" + String(pulsesToHeight(pulseCount), 1) + " cm)");
         }
       }
     }
