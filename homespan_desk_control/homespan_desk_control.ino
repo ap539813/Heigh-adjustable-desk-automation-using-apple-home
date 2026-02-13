@@ -272,21 +272,44 @@ void checkHallSensors() {
   int sensor1State = digitalRead(HALL_SENSOR1_PIN);
   int sensor2State = digitalRead(HALL_SENSOR2_PIN);
 
+  // Debug: Print sensor states continuously during movement (throttled)
+  if (currentState == MOVING_TO_TARGET) {
+    static unsigned long lastStatePrint = 0;
+    if (millis() - lastStatePrint > 1000) { // Every second
+      Serial.println("📊 Sensor States - S1: " + String(sensor1State) + ", S2: " + String(sensor2State) +
+                     " | Last: S1=" + String(sensor1LastState) + ", S2=" + String(sensor2LastState));
+      lastStatePrint = millis();
+    }
+  }
+
   if (sensor1State == HIGH && sensor1LastState == LOW) {
     if (millis() - lastDebounceTime > debounceDelay) {
+      int oldPulseCount = pulseCount;
+      String direction;
+
       if (sensor2State == LOW) {
         pulseCount++;
+        direction = "UP ⬆️";
       } else {
         pulseCount--;
+        direction = "DOWN ⬇️";
       }
       lastDebounceTime = millis();
 
-      // Debug output during movement only
+      // Debug output - ALWAYS print when pulse detected during movement
       if (currentState == MOVING_TO_TARGET) {
-        static unsigned long lastHallPrint = 0;
-        if (millis() - lastHallPrint > 200) { // Limit print frequency
-          Serial.println("🧲 Hall: " + String(pulseCount) + " pulses, Height: " + String(pulsesToHeight(pulseCount), 1) + " cm");
-          lastHallPrint = millis();
+        Serial.println("🧲 PULSE DETECTED " + direction);
+        Serial.println("   S1=" + String(sensor1State) + " S2=" + String(sensor2State));
+        Serial.println("   Pulse: " + String(oldPulseCount) + " -> " + String(pulseCount));
+        Serial.println("   Height: " + String(pulsesToHeight(pulseCount), 1) + " cm");
+      }
+    } else {
+      // Debug: Pulse was debounced
+      if (currentState == MOVING_TO_TARGET) {
+        static unsigned long lastDebouncePrint = 0;
+        if (millis() - lastDebouncePrint > 500) {
+          Serial.println("⚠️ Pulse DEBOUNCED (too fast)");
+          lastDebouncePrint = millis();
         }
       }
     }
@@ -411,6 +434,11 @@ struct SmartSliderDeskControl : Service::WindowCovering {
       float currentHeight = pulsesToHeight(pulseCount);
       float targetHeight = pulsesToHeight(targetPulses);
 
+      Serial.println("📺 LCD UPDATE:");
+      Serial.println("   Current: " + String(pulseCount) + " pulses = " + String(currentHeight, 1) + " cm");
+      Serial.println("   Target: " + String(targetPulses) + " pulses = " + String(targetHeight, 1) + " cm");
+      Serial.println("   Display: " + String(currentHeight, 1) + " -> " + String(targetHeight, 1));
+
       lcd.clear();
       lcd.setCursor(0, 0);
       lcd.print("Moving:");
@@ -425,12 +453,28 @@ struct SmartSliderDeskControl : Service::WindowCovering {
     // Check if we've reached the target
     int pulseDifference = abs(pulseCount - targetPulses);
     bool timeoutReached = (millis() - movementStartTime) > MOVEMENT_TIMEOUT;
+    unsigned long elapsedTime = millis() - movementStartTime;
+
+    // Debug: Print progress every 2 seconds
+    static unsigned long lastProgressPrint = 0;
+    if (millis() - lastProgressPrint > 2000) {
+      Serial.println("⏱️ PROGRESS CHECK:");
+      Serial.println("   Current: " + String(pulseCount) + " pulses");
+      Serial.println("   Target: " + String(targetPulses) + " pulses");
+      Serial.println("   Difference: " + String(pulseDifference) + " pulses (threshold: " + String(ERROR_THRESHOLD) + ")");
+      Serial.println("   Time elapsed: " + String(elapsedTime / 1000) + "s / " + String(MOVEMENT_TIMEOUT / 1000) + "s");
+      lastProgressPrint = millis();
+    }
 
     if (pulseDifference <= ERROR_THRESHOLD || timeoutReached) {
       if (timeoutReached) {
-        Serial.println("⏰ Movement timeout reached");
+        Serial.println("⏰ MOVEMENT TIMEOUT!");
+        Serial.println("   Started at: " + String(pulseCount) + " pulses");
+        Serial.println("   Target was: " + String(targetPulses) + " pulses");
+        Serial.println("   Time: " + String(elapsedTime / 1000) + " seconds");
       } else {
-        Serial.println("✅ Target reached within " + String(pulseDifference) + " pulse tolerance");
+        Serial.println("✅ TARGET REACHED!");
+        Serial.println("   Pulse difference: " + String(pulseDifference) + " (within threshold)");
       }
 
       currentState = FINALIZING;
