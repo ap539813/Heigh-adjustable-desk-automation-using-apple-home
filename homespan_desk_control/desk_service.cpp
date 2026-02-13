@@ -140,15 +140,26 @@ void SmartSliderDeskControl::handleMovementProgress() {
     lcd.print(buf);
 
     lastLcdUpdate = millis();
+
+    // Debug: Print to serial every LCD update
+    Serial.println("📺 LCD Update: " + String(currentHeight, 1) + " cm -> " + String(targetHeight, 1) + " cm (Pulses: " + String(pulseCount) + "/" + String(targetPulses) + ")");
   }
 
   // Check if we've reached the target
   int pulseDifference = abs(pulseCount - targetPulses);
   bool timeoutReached = (millis() - movementStartTime) > MOVEMENT_TIMEOUT;
 
+  // Debug: Print progress every 2 seconds
+  static unsigned long lastProgressPrint = 0;
+  if (millis() - lastProgressPrint > 2000) {
+    Serial.println("⏱️ Progress: " + String(pulseCount) + "/" + String(targetPulses) + " pulses (diff: " + String(pulseDifference) + ", time: " + String((millis() - movementStartTime) / 1000) + "s)");
+    lastProgressPrint = millis();
+  }
+
   if (pulseDifference <= ERROR_THRESHOLD || timeoutReached) {
     if (timeoutReached) {
       Serial.println("⏰ Movement timeout reached");
+      Serial.println("   Started at: " + String(pulseCount) + " pulses, Target: " + String(targetPulses) + " pulses");
     } else {
       Serial.println("✅ Target reached within " + String(pulseDifference) + " pulse tolerance");
     }
