@@ -18,7 +18,7 @@ struct SmartSliderDeskControl : Service::WindowCovering {
   int pendingTargetPercent;
   bool hasPendingTarget;
 
-  // External state (shared with main)
+  // References to global state
   int& pulseCount;
   MovementState& currentState;
   int& targetPulses;
@@ -42,6 +42,7 @@ struct SmartSliderDeskControl : Service::WindowCovering {
   boolean update() override;
   void loop() override;
 
+private:
   void handleMovementStateMachine();
   void startMovementToTarget();
   void handleMovementProgress();

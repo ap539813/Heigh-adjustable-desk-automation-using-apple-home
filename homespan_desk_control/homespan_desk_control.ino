@@ -7,6 +7,7 @@
  * - Clean hall sensor operation during movement
  * - Slider position updates after movement completion
  * - Separate movement state machine
+ * - Modular code structure for maintainability
  */
 
 #include <Arduino.h>
@@ -179,8 +180,8 @@ void setup() {
 void loop() {
   homeSpan.poll();
 
-  // Check hall sensors and update pulse count
-  pulseCount = HallSensor::check(pulseCount, currentState);
+  // Check hall sensors and update pulse count directly
+  HallSensor::check(pulseCount, currentState);
 
   // LCD backlight timeout
   if (backlightOn && currentState == IDLE && lastMotorStopTime > 0) {
