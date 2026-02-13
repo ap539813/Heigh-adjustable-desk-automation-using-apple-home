@@ -380,6 +380,10 @@ struct SmartSliderDeskControl : Service::WindowCovering {
         break;
 
       case FINALIZING:
+        // CRITICAL: Finalize runs ONCE and immediately transitions to IDLE
+        // Set to IDLE first to prevent re-entry
+        Serial.println("🔄 STATE: FINALIZING → IDLE (preventing re-entry)");
+        currentState = IDLE;
         finalizeMovement();
         break;
     }
@@ -422,6 +426,7 @@ struct SmartSliderDeskControl : Service::WindowCovering {
     lcd.print(String(targetHeight, 1) + " cm");
 
     // Transition to moving state
+    Serial.println("🔄 STATE: IDLE → MOVING_TO_TARGET");
     currentState = MOVING_TO_TARGET;
     movementStartTime = millis();
     hasPendingTarget = false;
@@ -477,6 +482,7 @@ struct SmartSliderDeskControl : Service::WindowCovering {
         Serial.println("   Pulse difference: " + String(pulseDifference) + " (within threshold)");
       }
 
+      Serial.println("🔄 STATE: MOVING_TO_TARGET → FINALIZING");
       currentState = FINALIZING;
     }
   }
@@ -512,8 +518,7 @@ struct SmartSliderDeskControl : Service::WindowCovering {
     Serial.println("   Final: " + String(pulsesToPercentage(pulseCount), 1) + "% = " + String(finalHeight, 1) + " cm (" + String(pulseCount) + " pulses)");
     Serial.println("   HomeKit slider updated to match actual position\n");
 
-    // Return to idle state
-    currentState = IDLE;
+    // Note: currentState already set to IDLE before calling this function
   }
 
   void updateCurrentPosition() {
