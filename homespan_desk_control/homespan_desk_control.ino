@@ -83,9 +83,7 @@ unsigned long lastMotorStopTime = 0;
 
 // Hall sensor variables
 volatile int pulseCount = 0;
-int sensor1LastState = 0;
-int sensor2LastState = 0;
-unsigned long lastDebounceTime = 0;
+volatile unsigned long lastDebounceTime = 0;
 const unsigned long debounceDelay = 5;
 
 // I²C devices
@@ -251,44 +249,33 @@ void startMovingDown() {
 }
 
 // ===== HALL SENSOR FUNCTIONS =====
+
+// ISR — runs instantly on every rising edge of sensor1, never misses a pulse.
+// IRAM_ATTR keeps it in fast RAM so it can fire even when flash is busy.
+void IRAM_ATTR hallSensorISR() {
+  unsigned long now = millis();
+  if (now - lastDebounceTime > debounceDelay) {
+    if (currentDir == DIR_UP) {
+      pulseCount++;
+    } else if (currentDir == DIR_DOWN) {
+      pulseCount--;
+    } else {
+      // Motor not running — fall back to sensor2.
+      // If direction is still wrong for your hardware, swap +/- here.
+      pulseCount += (digitalRead(HALL_SENSOR2_PIN) == LOW) ? 1 : -1;
+    }
+    pulseCount = constrain(pulseCount, PULSES_AT_MIN_HEIGHT, PULSES_AT_MAX_HEIGHT);
+    lastDebounceTime = now;
+  }
+}
+
 void initHallSensors() {
   pinMode(HALL_SENSOR1_PIN, INPUT);
   pinMode(HALL_SENSOR2_PIN, INPUT);
-  sensor1LastState = digitalRead(HALL_SENSOR1_PIN);
-  sensor2LastState = digitalRead(HALL_SENSOR2_PIN);
-  Serial.printf("[Init] Hall sensors ready\n");
-}
-
-void checkHallSensors() {
-  int sensor1State = digitalRead(HALL_SENSOR1_PIN);
-  int sensor2State = digitalRead(HALL_SENSOR2_PIN);
-
-  if (sensor1State == HIGH && sensor1LastState == LOW) {
-    if (millis() - lastDebounceTime > debounceDelay) {
-      // Use known motor direction instead of sensor2 inference.
-      // This is always correct regardless of wiring/magnet orientation.
-      if (currentDir == DIR_UP) {
-        pulseCount++;
-      } else if (currentDir == DIR_DOWN) {
-        pulseCount--;
-      } else {
-        // Motor not running — fall back to sensor2
-        // If still inverted for your hardware, swap +/- here
-        if (sensor2State == LOW) {
-          pulseCount++;
-        } else {
-          pulseCount--;
-        }
-      }
-
-      // Clamp to valid range to prevent runaway
-      pulseCount = constrain(pulseCount, PULSES_AT_MIN_HEIGHT, PULSES_AT_MAX_HEIGHT);
-      lastDebounceTime = millis();
-    }
-  }
-
-  sensor1LastState = sensor1State;
-  sensor2LastState = sensor2State;
+  // Trigger ISR on every rising edge — catches pulses regardless of loop() speed.
+  // If pulses are missed, try FALLING or CHANGE instead of RISING.
+  attachInterrupt(digitalPinToInterrupt(HALL_SENSOR1_PIN), hallSensorISR, RISING);
+  Serial.printf("[Init] Hall sensors ready (interrupt-driven)\n");
 }
 
 // Pad string to fixed width (prevents leftover characters on LCD)
@@ -576,7 +563,6 @@ void setup() {
 // ===== MAIN LOOP =====
 void loop() {
   homeSpan.poll();
-  checkHallSensors();
 
   // LCD backlight timeout
   if (backlightOn && currentState == IDLE && lastMotorStopTime > 0) {
