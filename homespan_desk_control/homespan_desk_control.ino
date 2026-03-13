@@ -116,26 +116,26 @@ int percentageToPulses(float percentage) {
 // ===== EEPROM FUNCTIONS =====
 void initStorage() {
   EEPROM.begin(EEPROM_SIZE);
-  Serial.println("📦 EEPROM storage initialized");
+  Serial.printf("[Init] EEPROM ready\n");
 }
 
 void savePulseCount() {
   EEPROM.writeInt(EEPROM_PULSES_ADDR, pulseCount);
   EEPROM.commit();
-  Serial.println("💾 Saved pulse count: " + String(pulseCount));
+  Serial.printf("[EEPROM] Saved: %d pulses\n", pulseCount);
 }
 
 void loadPulseCount() {
   int magic = EEPROM.readInt(EEPROM_MAGIC_ADDR);
   if (magic != EEPROM_MAGIC) {
-    Serial.println("🆕 First time setup - initializing EEPROM");
+    Serial.printf("[EEPROM] First run, initializing\n");
     EEPROM.writeInt(EEPROM_MAGIC_ADDR, EEPROM_MAGIC);
     EEPROM.writeInt(EEPROM_PULSES_ADDR, 0);
     EEPROM.commit();
     pulseCount = 0;
   } else {
     pulseCount = EEPROM.readInt(EEPROM_PULSES_ADDR);
-    Serial.println("📂 Loaded pulse count: " + String(pulseCount));
+    Serial.printf("[EEPROM] Loaded: %d pulses\n", pulseCount);
   }
 
   // Clamp to valid range
@@ -147,11 +147,11 @@ void loadPulseCount() {
 bool initToFSensor() {
   bool success = tof.init();
   if (success) {
-    Serial.println("📡 VL53L0X sensor initialized");
+    Serial.printf("[Init] ToF ready\n");
     tof.setTimeout(500);
     tof.startContinuous();
   } else {
-    Serial.println("❌ VL53L0X sensor failed to initialize");
+    Serial.printf("[Init] ToF FAILED\n");
   }
   return success;
 }
@@ -159,8 +159,6 @@ bool initToFSensor() {
 float measureHeightWithTof() {
   float totalHeight = 0;
   int validReadings = 0;
-
-  Serial.println("📏 Taking ToF measurements...");
 
   for (uint8_t s = 0; s < DISTANCE_CYCLE; s++) {
     uint16_t dist_mm = tof.readRangeContinuousMillimeters();
@@ -174,29 +172,25 @@ float measureHeightWithTof() {
   }
 
   if (validReadings > 0) {
-    float avgHeight = totalHeight / validReadings;
-    Serial.println("📐 Average ToF height: " + String(avgHeight) + " cm (" + String(validReadings) + " readings)");
-    return avgHeight;
+    return totalHeight / validReadings;
   } else {
-    Serial.println("❌ No valid ToF readings obtained");
     return -1;
   }
 }
 
 void calibrateWithTof() {
-  Serial.println("🎯 Starting ToF calibration...");
   float measuredHeight = measureHeightWithTof();
 
-  if (measuredHeight > 0 && measuredHeight >= MIN_HEIGHT_CM && measuredHeight <= MAX_HEIGHT_CM) {
+  // Accept readings within 5cm margin, then clamp to valid range
+  if (measuredHeight > 0 && measuredHeight >= (MIN_HEIGHT_CM - 5.0) && measuredHeight <= (MAX_HEIGHT_CM + 5.0)) {
+    float clamped = constrain(measuredHeight, MIN_HEIGHT_CM, MAX_HEIGHT_CM);
     int oldPulseCount = pulseCount;
-    pulseCount = heightToPulses(measuredHeight);
+    pulseCount = heightToPulses(clamped);
+    pulseCount = constrain(pulseCount, PULSES_AT_MIN_HEIGHT, PULSES_AT_MAX_HEIGHT);
 
-    Serial.println("✅ ToF Calibration:");
-    Serial.println("   Before: " + String(oldPulseCount) + " pulses (" + String(pulsesToHeight(oldPulseCount)) + " cm)");
-    Serial.println("   After:  " + String(pulseCount) + " pulses (" + String(measuredHeight) + " cm)");
-    Serial.println("   Adjustment: " + String(pulseCount - oldPulseCount) + " pulses");
+    Serial.printf("[ToF] Calibrated: %.1f cm (%d pulses, adj %+d)\n", clamped, pulseCount, pulseCount - oldPulseCount);
   } else {
-    Serial.println("⚠️ ToF reading out of range or invalid - keeping current position");
+    Serial.printf("[ToF] Out of range: %.1f cm, keeping %d pulses\n", measuredHeight, pulseCount);
   }
 }
 
@@ -213,7 +207,7 @@ void initMotorControl() {
   ledcWrite(R_PWM_PIN, 0);
   ledcWrite(L_PWM_PIN, 0);
 
-  Serial.println("🔧 Motor control initialized");
+  Serial.printf("[Init] Motor ready\n");
 }
 
 void smoothStartMotor(uint8_t pin) {
@@ -229,7 +223,6 @@ void smoothStopMotor() {
                : 255;
 
   if (pin != 255) {
-    Serial.println("🛑 Smooth stopping motor...");
     for (int s = TARGET_SPEED; s >= 0; s -= RAMP_STEP * 2) {
       ledcWrite(pin, s);
       delay(RAMP_DELAY);
@@ -242,7 +235,6 @@ void smoothStopMotor() {
 }
 
 void startMovingUp() {
-  Serial.println("⬆️ Starting upward movement (L_PWM)");
   smoothStopMotor();
   delay(50);
   ledcWrite(R_PWM_PIN, 0);
@@ -251,7 +243,6 @@ void startMovingUp() {
 }
 
 void startMovingDown() {
-  Serial.println("⬇️ Starting downward movement (R_PWM)");
   smoothStopMotor();
   delay(50);
   ledcWrite(L_PWM_PIN, 0);
@@ -265,58 +256,53 @@ void initHallSensors() {
   pinMode(HALL_SENSOR2_PIN, INPUT);
   sensor1LastState = digitalRead(HALL_SENSOR1_PIN);
   sensor2LastState = digitalRead(HALL_SENSOR2_PIN);
-  Serial.println("🧲 Hall sensors initialized");
+  Serial.printf("[Init] Hall sensors ready\n");
 }
 
 void checkHallSensors() {
   int sensor1State = digitalRead(HALL_SENSOR1_PIN);
   int sensor2State = digitalRead(HALL_SENSOR2_PIN);
 
-  // Debug: Print sensor states continuously during movement (throttled)
-  if (currentState == MOVING_TO_TARGET) {
-    static unsigned long lastStatePrint = 0;
-    if (millis() - lastStatePrint > 1000) { // Every second
-      Serial.println("📊 Sensor States - S1: " + String(sensor1State) + ", S2: " + String(sensor2State) +
-                     " | Last: S1=" + String(sensor1LastState) + ", S2=" + String(sensor2LastState));
-      lastStatePrint = millis();
-    }
-  }
-
   if (sensor1State == HIGH && sensor1LastState == LOW) {
     if (millis() - lastDebounceTime > debounceDelay) {
-      int oldPulseCount = pulseCount;
-      String direction;
-
-      if (sensor2State == LOW) {
+      // Use known motor direction instead of sensor2 inference.
+      // This is always correct regardless of wiring/magnet orientation.
+      if (currentDir == DIR_UP) {
         pulseCount++;
-        direction = "UP ⬆️";
-      } else {
+      } else if (currentDir == DIR_DOWN) {
         pulseCount--;
-        direction = "DOWN ⬇️";
-      }
-      lastDebounceTime = millis();
-
-      // Debug output - ALWAYS print when pulse detected during movement
-      if (currentState == MOVING_TO_TARGET) {
-        Serial.println("🧲 PULSE DETECTED " + direction);
-        Serial.println("   S1=" + String(sensor1State) + " S2=" + String(sensor2State));
-        Serial.println("   Pulse: " + String(oldPulseCount) + " -> " + String(pulseCount));
-        Serial.println("   Height: " + String(pulsesToHeight(pulseCount), 1) + " cm");
-      }
-    } else {
-      // Debug: Pulse was debounced
-      if (currentState == MOVING_TO_TARGET) {
-        static unsigned long lastDebouncePrint = 0;
-        if (millis() - lastDebouncePrint > 500) {
-          Serial.println("⚠️ Pulse DEBOUNCED (too fast)");
-          lastDebouncePrint = millis();
+      } else {
+        // Motor not running — fall back to sensor2
+        // If still inverted for your hardware, swap +/- here
+        if (sensor2State == LOW) {
+          pulseCount++;
+        } else {
+          pulseCount--;
         }
       }
+
+      // Clamp to valid range to prevent runaway
+      pulseCount = constrain(pulseCount, PULSES_AT_MIN_HEIGHT, PULSES_AT_MAX_HEIGHT);
+      lastDebounceTime = millis();
     }
   }
 
   sensor1LastState = sensor1State;
   sensor2LastState = sensor2State;
+}
+
+// Pad string to fixed width (prevents leftover characters on LCD)
+String padRight(String s, int width) {
+  while (s.length() < (unsigned)width) s += ' ';
+  return s.substring(0, width);
+}
+
+// Write to LCD without clearing — no flicker
+void lcdShowTwoLines(const String &line1, const String &line2) {
+  lcd.setCursor(0, 0);
+  lcd.print(padRight(line1, 16));
+  lcd.setCursor(0, 1);
+  lcd.print(padRight(line2, 16));
 }
 
 // ===== SMART SLIDER HOMEKIT SERVICE =====
@@ -339,7 +325,7 @@ struct SmartSliderDeskControl : Service::WindowCovering {
     deskControl = this;
     updateCurrentPosition();
 
-    Serial.println("🎛️ Smart slider desk control service created");
+    Serial.printf("[Init] HomeKit service ready\n");
   }
 
   boolean update() override {
@@ -350,7 +336,6 @@ struct SmartSliderDeskControl : Service::WindowCovering {
     hasPendingTarget = true;
     lastSliderChangeTime = millis();
 
-    Serial.println("🎯 Slider changed to " + String(newTargetPercent) + "% - waiting for settle...");
 
     return true;
   }
@@ -382,8 +367,7 @@ struct SmartSliderDeskControl : Service::WindowCovering {
       case FINALIZING:
         // CRITICAL: Finalize runs ONCE and immediately transitions to IDLE
         // Set to IDLE first to prevent re-entry
-        Serial.println("🔄 STATE: FINALIZING → IDLE (preventing re-entry)");
-        currentState = IDLE;
+          currentState = IDLE;
         finalizeMovement();
         break;
     }
@@ -394,24 +378,19 @@ struct SmartSliderDeskControl : Service::WindowCovering {
     float targetHeight = pulsesToHeight(targetPulses);
     float currentHeight = pulsesToHeight(pulseCount);
 
-    Serial.println("\n🚀 STARTING MOVEMENT:");
-    Serial.println("   Target: " + String(pendingTargetPercent) + "% = " + String(targetHeight, 1) + " cm (" + String(targetPulses) + " pulses)");
-    Serial.println("   Current: " + String(pulsesToPercentage(pulseCount), 1) + "% = " + String(currentHeight, 1) + " cm (" + String(pulseCount) + " pulses)");
-
     // Determine direction and start movement
     if (targetPulses > pulseCount) {
       startMovingUp();
       positionState->setVal(1); // Going to max
-      Serial.println("   Direction: UP ⬆️");
     } else if (targetPulses < pulseCount) {
       startMovingDown();
       positionState->setVal(0); // Going to min
-      Serial.println("   Direction: DOWN ⬇️");
     } else {
-      Serial.println("   Already at target! ✅");
       hasPendingTarget = false;
       return;
     }
+
+    Serial.printf("[Move] %.1f -> %.1f cm\n", currentHeight, targetHeight);
 
     // Update LCD
     if (!backlightOn) {
@@ -419,14 +398,9 @@ struct SmartSliderDeskControl : Service::WindowCovering {
       backlightOn = true;
     }
 
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("Moving to:");
-    lcd.setCursor(0, 1);
-    lcd.print(String(targetHeight, 1) + " cm");
+    lcdShowTwoLines("Moving to:", String(targetHeight, 1) + " cm");
 
     // Transition to moving state
-    Serial.println("🔄 STATE: IDLE → MOVING_TO_TARGET");
     currentState = MOVING_TO_TARGET;
     movementStartTime = millis();
     hasPendingTarget = false;
@@ -435,22 +409,13 @@ struct SmartSliderDeskControl : Service::WindowCovering {
   void handleMovementProgress() {
     // Update LCD periodically
     static unsigned long lastLcdUpdate = 0;
-    if (millis() - lastLcdUpdate > 500) {
+    if (millis() - lastLcdUpdate > 300) {
       float currentHeight = pulsesToHeight(pulseCount);
       float targetHeight = pulsesToHeight(targetPulses);
 
-      Serial.println("📺 LCD UPDATE:");
-      Serial.println("   Current: " + String(pulseCount) + " pulses = " + String(currentHeight, 1) + " cm");
-      Serial.println("   Target: " + String(targetPulses) + " pulses = " + String(targetHeight, 1) + " cm");
-      Serial.println("   Display: " + String(currentHeight, 1) + " -> " + String(targetHeight, 1));
-
-      lcd.clear();
-      lcd.setCursor(0, 0);
-      lcd.print("Moving:");
       char buf[16];
       snprintf(buf, sizeof(buf), "%.1f->%.1f", currentHeight, targetHeight);
-      lcd.setCursor(0, 1);
-      lcd.print(buf);
+      lcdShowTwoLines("Moving:", String(buf));
 
       lastLcdUpdate = millis();
     }
@@ -458,45 +423,26 @@ struct SmartSliderDeskControl : Service::WindowCovering {
     // Check if we've reached the target
     int pulseDifference = abs(pulseCount - targetPulses);
     bool timeoutReached = (millis() - movementStartTime) > MOVEMENT_TIMEOUT;
-    unsigned long elapsedTime = millis() - movementStartTime;
-
-    // Debug: Print progress every 2 seconds
-    static unsigned long lastProgressPrint = 0;
-    if (millis() - lastProgressPrint > 2000) {
-      Serial.println("⏱️ PROGRESS CHECK:");
-      Serial.println("   Current: " + String(pulseCount) + " pulses");
-      Serial.println("   Target: " + String(targetPulses) + " pulses");
-      Serial.println("   Difference: " + String(pulseDifference) + " pulses (threshold: " + String(ERROR_THRESHOLD) + ")");
-      Serial.println("   Time elapsed: " + String(elapsedTime / 1000) + "s / " + String(MOVEMENT_TIMEOUT / 1000) + "s");
-      lastProgressPrint = millis();
-    }
 
     if (pulseDifference <= ERROR_THRESHOLD || timeoutReached) {
       if (timeoutReached) {
-        Serial.println("⏰ MOVEMENT TIMEOUT!");
-        Serial.println("   Started at: " + String(pulseCount) + " pulses");
-        Serial.println("   Target was: " + String(targetPulses) + " pulses");
-        Serial.println("   Time: " + String(elapsedTime / 1000) + " seconds");
+        Serial.printf("[Timeout] %.1f cm (%d pulses)\n", pulsesToHeight(pulseCount), pulseCount);
       } else {
-        Serial.println("✅ TARGET REACHED!");
-        Serial.println("   Pulse difference: " + String(pulseDifference) + " (within threshold)");
+        Serial.printf("[Done] %.1f cm (%d pulses)\n", pulsesToHeight(pulseCount), pulseCount);
       }
 
-      Serial.println("🔄 STATE: MOVING_TO_TARGET → FINALIZING");
       currentState = FINALIZING;
     }
   }
 
   void finalizeMovement() {
-    Serial.println("🏁 Finalizing movement...");
-
     // Stop the motor
     smoothStopMotor();
     positionState->setVal(2); // Stopped
     lastMotorStopTime = millis();
 
     // Calibrate position
-    delay(200);
+    delay(500);
     calibrateWithTof();
 
     // Save position
@@ -508,15 +454,7 @@ struct SmartSliderDeskControl : Service::WindowCovering {
 
     // Update LCD
     float finalHeight = pulsesToHeight(pulseCount);
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("Height:");
-    lcd.setCursor(0, 1);
-    lcd.print(String(finalHeight, 1) + " cm");
-
-    Serial.println("🎉 Movement complete!");
-    Serial.println("   Final: " + String(pulsesToPercentage(pulseCount), 1) + "% = " + String(finalHeight, 1) + " cm (" + String(pulseCount) + " pulses)");
-    Serial.println("   HomeKit slider updated to match actual position\n");
+    lcdShowTwoLines("Height:", String(finalHeight, 1) + " cm");
 
     // Note: currentState already set to IDLE before calling this function
   }
@@ -535,8 +473,7 @@ void setup() {
   Serial.begin(115200);
   delay(2000);
 
-  Serial.println("\n\n🎛️ SMART DEBOUNCED SLIDER DESK CONTROL 🏠");
-  Serial.println("============================================");
+  Serial.printf("[Boot] Desk Controller v3.1\n");
 
   // Initialize storage
   initStorage();
@@ -547,9 +484,7 @@ void setup() {
   // Initialize LCD
   lcd.init();
   lcd.backlight();
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("Initializing...");
+  lcdShowTwoLines("Initializing...", "");
 
   // Initialize ToF sensor
   initToFSensor();
@@ -561,7 +496,7 @@ void setup() {
   if (pulseCount < 0) {
     pulseCount = 0;
     savePulseCount();
-    Serial.println("🔧 Fixed negative pulse count");
+    Serial.printf("[Init] Fixed negative pulse count\n");
   }
 
   // Initialize motor control
@@ -576,12 +511,12 @@ void setup() {
 
   // Show initial height
   float initialHeight = pulsesToHeight(pulseCount);
-  Serial.println("📏 Initial height: " + String(initialHeight, 1) + " cm (" + String(pulseCount) + " pulses)");
+  Serial.printf("[Init] Height: %.1f cm (%d pulses)\n", initialHeight, pulseCount);
 
   // Connect to WiFi
   delay(2000);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.print("📡 Connecting to WiFi");
+  Serial.printf("[Init] Connecting to WiFi...\n");
   // More robust WiFi connection
   WiFi.persistent(true);
   WiFi.setAutoReconnect(true);
@@ -595,16 +530,12 @@ void setup() {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\n✅ WiFi connected! IP: " + WiFi.localIP().toString());
+    Serial.printf("[Init] WiFi connected\n");
   } else {
-    Serial.println("\n❌ WiFi connection failed!");
+    Serial.printf("[Init] WiFi FAILED\n");
 
     // Show failure on LCD
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("WiFi FAILED!");
-    lcd.setCursor(0, 1);
-    lcd.print("Check Router");
+    lcdShowTwoLines("WiFi FAILED!", "Check Router");
 
     // Keep showing error (don't continue setup)
     while(true) {
@@ -619,7 +550,7 @@ void setup() {
 
   delay(2000);
   // Initialize HomeSpan
-  Serial.println("🏠 Initializing HomeSpan...");
+  Serial.printf("[Init] HomeSpan...\n");
   homeSpan.setLogLevel(0);
   homeSpan.enableOTA();
   homeSpan.setPairingCode("46637726");
@@ -633,20 +564,13 @@ void setup() {
       new Characteristic::Manufacturer("DIY");
       new Characteristic::Model("Smart Standing Desk");
       new Characteristic::SerialNumber("SMART-001");
-      new Characteristic::FirmwareRevision("3.0");
+      new Characteristic::FirmwareRevision("3.1");
     new SmartSliderDeskControl();
 
   // Final LCD update
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("HomeKit Ready");
-  lcd.setCursor(0, 1);
-  lcd.print(String(initialHeight, 1) + " cm");
+  lcdShowTwoLines("HomeKit Ready", String(initialHeight, 1) + " cm");
 
-  Serial.println("\n🎉 SYSTEM READY!");
-  Serial.println("📱 Add to Home app with code: 466-37-726");
-  Serial.println("🎛️ Slider will wait 1 second after changes before moving");
-  Serial.println("============================================\n");
+  Serial.printf("[Boot] Ready. Pairing: 466-37-726\n");
 }
 
 // ===== MAIN LOOP =====
@@ -665,7 +589,7 @@ void loop() {
   // Status heartbeat every 30 seconds when idle
   static unsigned long lastHeartbeat = 0;
   if (currentState == IDLE && millis() - lastHeartbeat > 30000) {
-    Serial.println("💓 System idle - Height: " + String(pulsesToHeight(pulseCount), 1) + " cm");
+    Serial.printf("[Idle] %.1f cm\n", pulsesToHeight(pulseCount));
     lastHeartbeat = millis();
   }
 }
