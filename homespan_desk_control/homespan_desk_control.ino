@@ -333,30 +333,11 @@ struct SmartSliderDeskControl : Service::WindowCovering {
   }
 
   void handleMovementStateMachine() {
-    switch (currentState) {
-
-      case IDLE:
-        // Check if we have a pending target to process
-        if (hasPendingTarget && millis() - lastSliderChangeTime >= SLIDER_DEBOUNCE_TIME) {
-          // Slider has settled - start movement
-          startMovementToTarget();
-        }
-        break;
-
-      case WAITING_FOR_SETTLE:
-        // This state is handled in IDLE now
-        break;
-
-      case MOVING_TO_TARGET:
-        handleMovementProgress();
-        break;
-
-      case FINALIZING:
-        // CRITICAL: Finalize runs ONCE and immediately transitions to IDLE
-        // Set to IDLE first to prevent re-entry
-          currentState = IDLE;
-        finalizeMovement();
-        break;
+    if (currentState == IDLE && hasPendingTarget &&
+        millis() - lastSliderChangeTime >= SLIDER_DEBOUNCE_TIME) {
+      currentState = MOVING_TO_TARGET; // prevents heartbeat firing mid-move
+      startMovementToTarget();         // blocks until movement is complete
+      currentState = IDLE;
     }
   }
 
@@ -365,85 +346,104 @@ struct SmartSliderDeskControl : Service::WindowCovering {
     float targetHeight = pulsesToHeight(targetPulses);
     float currentHeight = pulsesToHeight(pulseCount);
 
-    // Determine direction and start movement
-    if (targetPulses > pulseCount) {
-      startMovingUp();
-      positionState->setVal(1); // Going to max
-    } else if (targetPulses < pulseCount) {
-      startMovingDown();
-      positionState->setVal(0); // Going to min
-    } else {
+    if (targetPulses == pulseCount) {
       hasPendingTarget = false;
       return;
     }
 
+    // Start motor in correct direction
+    if (targetPulses > pulseCount) {
+      startMovingUp();
+      positionState->setVal(1);
+    } else {
+      startMovingDown();
+      positionState->setVal(0);
+    }
+
     Serial.printf("[Move] %.1f -> %.1f cm\n", currentHeight, targetHeight);
-
-    // Update LCD
-    if (!backlightOn) {
-      lcd.backlight();
-      backlightOn = true;
-    }
-
+    if (!backlightOn) { lcd.backlight(); backlightOn = true; }
     lcdShowTwoLines("Moving to:", String(targetHeight, 1) + " cm");
-
-    // Transition to moving state
-    currentState = MOVING_TO_TARGET;
-    movementStartTime = millis();
     hasPendingTarget = false;
-  }
 
-  void handleMovementProgress() {
-    // Update LCD periodically
-    static unsigned long lastLcdUpdate = 0;
-    if (millis() - lastLcdUpdate > 300) {
-      float currentHeight = pulsesToHeight(pulseCount);
-      float targetHeight = pulsesToHeight(targetPulses);
+    // ---- TIGHT DIAGNOSTIC LOOP ----
+    // Detach ISR so only this loop counts — avoids any double-counting.
+    detachInterrupt(digitalPinToInterrupt(HALL_SENSOR1_PIN));
 
-      char buf[16];
-      snprintf(buf, sizeof(buf), "%.1f->%.1f", currentHeight, targetHeight);
-      lcdShowTwoLines("Moving:", String(buf));
+    int sensor1Prev  = digitalRead(HALL_SENSOR1_PIN);
+    int pulsesAtStart = pulseCount;
+    unsigned long startTime      = millis();
+    unsigned long lastLcdUpdate  = 0;
+    unsigned long lastSerialPrint = 0;
+    unsigned long localDebounce  = 0;
 
-      lastLcdUpdate = millis();
-    }
+    while (true) {
+      unsigned long now = millis();
 
-    // Check if we've reached the target
-    int pulseDifference = abs(pulseCount - targetPulses);
-    bool timeoutReached = (millis() - movementStartTime) > MOVEMENT_TIMEOUT;
+      // Direct sensor read — no HomeSpan overhead
+      int s1 = digitalRead(HALL_SENSOR1_PIN);
+      if (s1 == HIGH && sensor1Prev == LOW) {           // rising edge
+        if (now - localDebounce > debounceDelay) {
+          if      (currentDir == DIR_UP)   pulseCount++;
+          else if (currentDir == DIR_DOWN) pulseCount--;
+          pulseCount = constrain(pulseCount, PULSES_AT_MIN_HEIGHT, PULSES_AT_MAX_HEIGHT);
+          localDebounce = now;
+        }
+      }
+      sensor1Prev = s1;
 
-    if (pulseDifference <= ERROR_THRESHOLD || timeoutReached) {
-      if (timeoutReached) {
-        Serial.printf("[Timeout] %.1f cm (%d pulses)\n", pulsesToHeight(pulseCount), pulseCount);
-      } else {
-        Serial.printf("[Done] %.1f cm (%d pulses)\n", pulsesToHeight(pulseCount), pulseCount);
+      // LCD every 300 ms
+      if (now - lastLcdUpdate > 300) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%.1f->%.1f", pulsesToHeight(pulseCount), targetHeight);
+        lcdShowTwoLines("Moving:", String(buf));
+        lastLcdUpdate = now;
       }
 
-      currentState = FINALIZING;
-    }
-  }
+      // Serial every 1 s — shows live pulse count so we can see if sensor fires
+      if (now - lastSerialPrint > 1000) {
+        Serial.printf("[Pulse] %d pulses  %.1f cm  (counted %+d so far)\n",
+                      pulseCount, pulsesToHeight(pulseCount),
+                      pulseCount - pulsesAtStart);
+        lastSerialPrint = now;
+      }
 
-  void finalizeMovement() {
-    // Stop the motor
+      // Target reached?
+      if (abs(pulseCount - targetPulses) <= ERROR_THRESHOLD) {
+        Serial.printf("[Done] %.1f cm (%d pulses, counted %d)\n",
+                      pulsesToHeight(pulseCount), pulseCount,
+                      abs(pulseCount - pulsesAtStart));
+        break;
+      }
+
+      // Timeout?
+      if (now - startTime > MOVEMENT_TIMEOUT) {
+        Serial.printf("[Timeout] %.1f cm (%d pulses, counted %d during move)\n",
+                      pulsesToHeight(pulseCount), pulseCount,
+                      abs(pulseCount - pulsesAtStart));
+        break;
+      }
+    }
+
+    // Re-attach interrupt for idle-time noise protection
+    attachInterrupt(digitalPinToInterrupt(HALL_SENSOR1_PIN), hallSensorISR, RISING);
+
+    // Stop motor
     smoothStopMotor();
-    positionState->setVal(2); // Stopped
+    positionState->setVal(2);
     lastMotorStopTime = millis();
 
-    // Calibrate position
+    // Calibrate and log drift between pulse count and ToF
+    int pulsesBefore = pulseCount;
     delay(500);
     calibrateWithTof();
+    int drift = pulseCount - pulsesBefore;
+    Serial.printf("[Drift] %+d pulses  (%.1f cm off)\n", drift, drift * CM_PER_PULSE);
 
-    // Save position
+    // Save and sync HomeKit
     savePulseCount();
-
-    // Update HomeKit position to actual position
     updateCurrentPosition();
-    target->setVal(current->getVal()); // Sync target to actual position
-
-    // Update LCD
-    float finalHeight = pulsesToHeight(pulseCount);
-    lcdShowTwoLines("Height:", String(finalHeight, 1) + " cm");
-
-    // Note: currentState already set to IDLE before calling this function
+    target->setVal(current->getVal());
+    lcdShowTwoLines("Height:", String(pulsesToHeight(pulseCount), 1) + " cm");
   }
 
   void updateCurrentPosition() {
