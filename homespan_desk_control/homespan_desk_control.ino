@@ -35,9 +35,9 @@ const uint8_t HALL_SENSOR1_PIN = 32;
 const uint8_t HALL_SENSOR2_PIN = 33;
 
 // Height and pulse calibration
-const int PULSES_AT_MIN_HEIGHT = 0;
+const int PULSES_AT_MIN_HEIGHT = 50;
 const int PULSES_AT_MAX_HEIGHT = 1840;
-const float MIN_HEIGHT_CM = 69.0;
+const float MIN_HEIGHT_CM = 72.0;
 const float MAX_HEIGHT_CM = 107.0;
 const float CM_PER_PULSE = (MAX_HEIGHT_CM - MIN_HEIGHT_CM) / (PULSES_AT_MAX_HEIGHT - PULSES_AT_MIN_HEIGHT);
 
