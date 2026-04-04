@@ -557,6 +557,9 @@ void setup() {
   // Final LCD update
   lcdShowTwoLines("HomeKit Ready", String(initialHeight, 1) + " cm");
 
+  // Start backlight timeout from boot — no need to wait for first movement
+  lastMotorStopTime = millis();
+
   Serial.printf("[Boot] Ready. Pairing: 466-37-726\n");
 }
 
