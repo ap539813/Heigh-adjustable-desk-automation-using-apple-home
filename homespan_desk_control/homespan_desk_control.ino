@@ -2,11 +2,10 @@
  * Smart Debounced Slider Desk Control
  *
  * Key Features:
+ * - VL53L0X ToF is the sole position sensor — no hall sensor
  * - Slider changes are captured but movement is delayed
  * - 1-second debounce period after last slider change
- * - Clean hall sensor operation during movement
  * - Slider position updates after movement completion
- * - Separate movement state machine
  */
 #include <Arduino.h>
 #include <WiFi.h>
@@ -17,7 +16,7 @@
 #include <HomeSpan.h>
 
 // ===== CONFIGURATION =====
-const char* WIFI_SSID = "A-19_4G";
+const char* WIFI_SSID     = "A-19_4G";
 const char* WIFI_PASSWORD = "lebhikhari";
 
 // I2C pins
@@ -25,66 +24,48 @@ const uint8_t SDA_PIN = 21;
 const uint8_t SCL_PIN = 22;
 
 // BTS7960 motor driver pins
-const uint8_t R_EN_PIN = 25;
-const uint8_t L_EN_PIN = 26;
+const uint8_t R_EN_PIN  = 25;
+const uint8_t L_EN_PIN  = 26;
 const uint8_t R_PWM_PIN = 14;
 const uint8_t L_PWM_PIN = 27;
 
-// Hall sensor pins
-const uint8_t HALL_SENSOR1_PIN = 32;
-const uint8_t HALL_SENSOR2_PIN = 33;
+// Height range
+const float MIN_HEIGHT_CM       = 69.0;
+const float MAX_HEIGHT_CM       = 107.0;
+const float HEIGHT_TOLERANCE_CM = 1.5;  // stop within this of target
+const int   MAX_TOF_FAILURES    = 5;    // consecutive bad reads → emergency stop
 
-// Height and pulse calibration
-const int PULSES_AT_MIN_HEIGHT = 50;
-const int PULSES_AT_MAX_HEIGHT = 1840;
-const float MIN_HEIGHT_CM = 72.0;
-const float MAX_HEIGHT_CM = 107.0;
-const float CM_PER_PULSE = (MAX_HEIGHT_CM - MIN_HEIGHT_CM) / (PULSES_AT_MAX_HEIGHT - PULSES_AT_MIN_HEIGHT);
-
-// EEPROM Storage
-const int EEPROM_SIZE = 16;
-const int EEPROM_MAGIC_ADDR = 0;
-const int EEPROM_PULSES_ADDR = 4;
-const int EEPROM_MAGIC = 0x4445534B;
+// EEPROM storage
+const int EEPROM_SIZE        = 16;
+const int EEPROM_MAGIC_ADDR  = 0;
+const int EEPROM_HEIGHT_ADDR = 4;       // stores height × 10 as int
+const int EEPROM_MAGIC       = 0x4445534B;
 
 // Motor settings
-const uint8_t TARGET_SPEED = 249;
-const uint8_t DISTANCE_CYCLE = 15;
-const uint8_t PWM_RES = 8;
-const uint32_t PWM_FREQ = 1000;
-const uint8_t RAMP_STEP = 10;
-const unsigned RAMP_DELAY = 10;
-const uint8_t ERROR_THRESHOLD = 10;
+const uint8_t  TARGET_SPEED   = 249;
+const uint8_t  DISTANCE_CYCLE = 15;
+const uint8_t  PWM_RES        = 8;
+const uint32_t PWM_FREQ       = 1000;
+const uint8_t  RAMP_STEP      = 10;
+const unsigned RAMP_DELAY     = 10;
 
 // System settings
-const unsigned long BACKLIGHT_TIMEOUT = 10000;
-const unsigned long MOVEMENT_TIMEOUT = 15000;
-const unsigned long SLIDER_DEBOUNCE_TIME = 1000; // 1 second debounce
+const unsigned long BACKLIGHT_TIMEOUT    = 10000;
+const unsigned long MOVEMENT_TIMEOUT    = 15000;
+const unsigned long SLIDER_DEBOUNCE_TIME = 1000;
 
 // Movement states
-enum MovementState {
-  IDLE,
-  WAITING_FOR_SETTLE,
-  MOVING_TO_TARGET,
-  FINALIZING
-};
-
+enum MovementState { IDLE, MOVING_TO_TARGET };
 enum Direction { DIR_NONE = 0, DIR_UP = 1, DIR_DOWN = -1 };
 
 // ===== GLOBAL VARIABLES =====
-// Movement control
-MovementState currentState = IDLE;
-Direction currentDir = DIR_NONE;
-int targetPulses = 0;
+MovementState currentState    = IDLE;
+Direction     currentDir      = DIR_NONE;
+float         currentHeightCm = MIN_HEIGHT_CM;
+float         targetHeightCm  = MIN_HEIGHT_CM;
 unsigned long lastSliderChangeTime = 0;
-unsigned long movementStartTime = 0;
-bool backlightOn = true;
+bool          backlightOn     = true;
 unsigned long lastMotorStopTime = 0;
-
-// Hall sensor variables
-volatile int pulseCount = 0;
-volatile unsigned long lastDebounceTime = 0;
-const unsigned long debounceDelay = 5;
 
 // I²C devices
 VL53L0X tof;
@@ -95,20 +76,12 @@ struct SmartSliderDeskControl;
 SmartSliderDeskControl* deskControl = nullptr;
 
 // ===== UTILITY FUNCTIONS =====
-float pulsesToHeight(int pulses) {
-  return MIN_HEIGHT_CM + (pulses * CM_PER_PULSE);
+float heightToPercentage(float height) {
+  return ((height - MIN_HEIGHT_CM) / (MAX_HEIGHT_CM - MIN_HEIGHT_CM)) * 100.0;
 }
 
-int heightToPulses(float height) {
-  return (int)((height - MIN_HEIGHT_CM) / CM_PER_PULSE);
-}
-
-float pulsesToPercentage(int pulses) {
-  return ((float)(pulses - PULSES_AT_MIN_HEIGHT) / (PULSES_AT_MAX_HEIGHT - PULSES_AT_MIN_HEIGHT)) * 100.0;
-}
-
-int percentageToPulses(float percentage) {
-  return PULSES_AT_MIN_HEIGHT + (int)((percentage / 100.0) * (PULSES_AT_MAX_HEIGHT - PULSES_AT_MIN_HEIGHT));
+float percentageToHeight(float percentage) {
+  return MIN_HEIGHT_CM + (percentage / 100.0) * (MAX_HEIGHT_CM - MIN_HEIGHT_CM);
 }
 
 // ===== EEPROM FUNCTIONS =====
@@ -117,28 +90,25 @@ void initStorage() {
   Serial.printf("[Init] EEPROM ready\n");
 }
 
-void savePulseCount() {
-  EEPROM.writeInt(EEPROM_PULSES_ADDR, pulseCount);
+void saveHeight() {
+  EEPROM.writeInt(EEPROM_HEIGHT_ADDR, (int)(currentHeightCm * 10));
   EEPROM.commit();
-  Serial.printf("[EEPROM] Saved: %d pulses\n", pulseCount);
+  Serial.printf("[EEPROM] Saved: %.1f cm\n", currentHeightCm);
 }
 
-void loadPulseCount() {
+void loadHeight() {
   int magic = EEPROM.readInt(EEPROM_MAGIC_ADDR);
   if (magic != EEPROM_MAGIC) {
     Serial.printf("[EEPROM] First run, initializing\n");
     EEPROM.writeInt(EEPROM_MAGIC_ADDR, EEPROM_MAGIC);
-    EEPROM.writeInt(EEPROM_PULSES_ADDR, 0);
+    EEPROM.writeInt(EEPROM_HEIGHT_ADDR, (int)(MIN_HEIGHT_CM * 10));
     EEPROM.commit();
-    pulseCount = 0;
+    currentHeightCm = MIN_HEIGHT_CM;
   } else {
-    pulseCount = EEPROM.readInt(EEPROM_PULSES_ADDR);
-    Serial.printf("[EEPROM] Loaded: %d pulses\n", pulseCount);
+    currentHeightCm = EEPROM.readInt(EEPROM_HEIGHT_ADDR) / 10.0f;
+    Serial.printf("[EEPROM] Loaded: %.1f cm\n", currentHeightCm);
   }
-
-  // Clamp to valid range
-  if (pulseCount < PULSES_AT_MIN_HEIGHT) pulseCount = PULSES_AT_MIN_HEIGHT;
-  if (pulseCount > PULSES_AT_MAX_HEIGHT) pulseCount = PULSES_AT_MAX_HEIGHT;
+  currentHeightCm = constrain(currentHeightCm, MIN_HEIGHT_CM, MAX_HEIGHT_CM);
 }
 
 // ===== TOF SENSOR FUNCTIONS =====
@@ -147,48 +117,44 @@ bool initToFSensor() {
   if (success) {
     Serial.printf("[Init] ToF ready\n");
     tof.setTimeout(500);
-    tof.startContinuous();
+    tof.setMeasurementTimingBudget(20000); // 20ms — fast reads during movement
+    tof.startContinuous(20);              // new reading every 20ms
   } else {
     Serial.printf("[Init] ToF FAILED\n");
   }
   return success;
 }
 
-float measureHeightWithTof() {
-  float totalHeight = 0;
-  int validReadings = 0;
+// Single fast read — used inside the movement loop
+float readHeightNow() {
+  uint16_t dist_mm = tof.readRangeContinuousMillimeters();
+  if (tof.timeoutOccurred()) return -1;
+  return dist_mm / 10.0f;
+}
 
+// Averaged read — used for accurate post-move calibration
+float measureHeightWithTof() {
+  float total = 0;
+  int   valid = 0;
   for (uint8_t s = 0; s < DISTANCE_CYCLE; s++) {
     uint16_t dist_mm = tof.readRangeContinuousMillimeters();
-
     if (!tof.timeoutOccurred()) {
-      float height_cm = (dist_mm / 10.0);
-      totalHeight += height_cm;
-      validReadings++;
+      total += dist_mm / 10.0f;
+      valid++;
     }
     delay(5);
   }
-
-  if (validReadings > 0) {
-    return totalHeight / validReadings;
-  } else {
-    return -1;
-  }
+  return (valid > 0) ? total / valid : -1;
 }
 
 void calibrateWithTof() {
-  float measuredHeight = measureHeightWithTof();
-
-  // Accept readings within 5cm margin, then clamp to valid range
-  if (measuredHeight > 0 && measuredHeight >= (MIN_HEIGHT_CM - 5.0) && measuredHeight <= (MAX_HEIGHT_CM + 5.0)) {
-    float clamped = constrain(measuredHeight, MIN_HEIGHT_CM, MAX_HEIGHT_CM);
-    int oldPulseCount = pulseCount;
-    pulseCount = heightToPulses(clamped);
-    pulseCount = constrain(pulseCount, PULSES_AT_MIN_HEIGHT, PULSES_AT_MAX_HEIGHT);
-
-    Serial.printf("[ToF] Calibrated: %.1f cm (%d pulses, adj %+d)\n", clamped, pulseCount, pulseCount - oldPulseCount);
+  float measured = measureHeightWithTof();
+  if (measured > 0 && measured >= (MIN_HEIGHT_CM - 5.0) && measured <= (MAX_HEIGHT_CM + 5.0)) {
+    float old = currentHeightCm;
+    currentHeightCm = constrain(measured, MIN_HEIGHT_CM, MAX_HEIGHT_CM);
+    Serial.printf("[ToF] Calibrated: %.1f cm (was %.1f cm)\n", currentHeightCm, old);
   } else {
-    Serial.printf("[ToF] Out of range: %.1f cm, keeping %d pulses\n", measuredHeight, pulseCount);
+    Serial.printf("[ToF] Out of range: %.1f cm, keeping %.1f cm\n", measured, currentHeightCm);
   }
 }
 
@@ -216,17 +182,15 @@ void smoothStartMotor(uint8_t pin) {
 }
 
 void smoothStopMotor() {
-  uint8_t pin = (currentDir == DIR_UP) ? L_PWM_PIN
-               : (currentDir == DIR_DOWN) ? R_PWM_PIN
-               : 255;
-
+  uint8_t pin = (currentDir == DIR_UP)   ? L_PWM_PIN
+              : (currentDir == DIR_DOWN) ? R_PWM_PIN
+              : 255;
   if (pin != 255) {
     for (int s = TARGET_SPEED; s >= 0; s -= RAMP_STEP * 2) {
       ledcWrite(pin, s);
       delay(RAMP_DELAY);
     }
   }
-
   ledcWrite(R_PWM_PIN, 0);
   ledcWrite(L_PWM_PIN, 0);
   currentDir = DIR_NONE;
@@ -248,35 +212,7 @@ void startMovingDown() {
   currentDir = DIR_DOWN;
 }
 
-// ===== HALL SENSOR FUNCTIONS =====
-
-// ISR — runs instantly on every rising edge of sensor1, never misses a pulse.
-// IRAM_ATTR keeps it in fast RAM so it can fire even when flash is busy.
-void IRAM_ATTR hallSensorISR() {
-  unsigned long now = millis();
-  if (now - lastDebounceTime > debounceDelay) {
-    if (currentDir == DIR_UP) {
-      pulseCount++;
-    } else if (currentDir == DIR_DOWN) {
-      pulseCount--;
-    } else {
-      // Motor not running — fall back to sensor2.
-      // If direction is still wrong for your hardware, swap +/- here.
-      pulseCount += (digitalRead(HALL_SENSOR2_PIN) == LOW) ? 1 : -1;
-    }
-    pulseCount = constrain(pulseCount, PULSES_AT_MIN_HEIGHT, PULSES_AT_MAX_HEIGHT);
-    lastDebounceTime = now;
-  }
-}
-
-void initHallSensors() {
-  pinMode(HALL_SENSOR1_PIN, INPUT);
-  pinMode(HALL_SENSOR2_PIN, INPUT);
-  // Trigger ISR on every rising edge — catches pulses regardless of loop() speed.
-  // If pulses are missed, try FALLING or CHANGE instead of RISING.
-  attachInterrupt(digitalPinToInterrupt(HALL_SENSOR1_PIN), hallSensorISR, RISING);
-  Serial.printf("[Init] Hall sensors ready (interrupt-driven)\n");
-}
+// ===== LCD HELPERS =====
 
 // Pad string to fixed width (prevents leftover characters on LCD)
 String padRight(String s, int width) {
@@ -298,16 +234,16 @@ struct SmartSliderDeskControl : Service::WindowCovering {
   SpanCharacteristic *target;
   SpanCharacteristic *positionState;
 
-  int pendingTargetPercent;
+  int  pendingTargetPercent;
   bool hasPendingTarget;
 
   SmartSliderDeskControl() : Service::WindowCovering() {
-    current = new Characteristic::CurrentPosition(0);
-    target = new Characteristic::TargetPosition(0);
+    current       = new Characteristic::CurrentPosition(0);
+    target        = new Characteristic::TargetPosition(0);
     positionState = new Characteristic::PositionState(2); // Stopped
 
     pendingTargetPercent = 0;
-    hasPendingTarget = false;
+    hasPendingTarget     = false;
 
     deskControl = this;
     updateCurrentPosition();
@@ -316,43 +252,28 @@ struct SmartSliderDeskControl : Service::WindowCovering {
   }
 
   boolean update() override {
-    int newTargetPercent = target->getNewVal();
-
-    // Record the slider change but don't move yet
-    pendingTargetPercent = newTargetPercent;
-    hasPendingTarget = true;
+    pendingTargetPercent = target->getNewVal();
+    hasPendingTarget     = true;
     lastSliderChangeTime = millis();
-
-
     return true;
   }
 
   void loop() override {
-    // Handle the state machine
-    handleMovementStateMachine();
-  }
-
-  void handleMovementStateMachine() {
     if (currentState == IDLE && hasPendingTarget &&
         millis() - lastSliderChangeTime >= SLIDER_DEBOUNCE_TIME) {
-      currentState = MOVING_TO_TARGET; // prevents heartbeat firing mid-move
-      startMovementToTarget();         // blocks until movement is complete
+      currentState = MOVING_TO_TARGET;
+      startMovementToTarget();
       currentState = IDLE;
     }
   }
 
   void startMovementToTarget() {
-    targetPulses = percentageToPulses(pendingTargetPercent);
-    float targetHeight = pulsesToHeight(targetPulses);
-    float currentHeight = pulsesToHeight(pulseCount);
+    targetHeightCm   = percentageToHeight(pendingTargetPercent);
+    hasPendingTarget = false;
 
-    if (targetPulses == pulseCount) {
-      hasPendingTarget = false;
-      return;
-    }
+    if (abs(currentHeightCm - targetHeightCm) < HEIGHT_TOLERANCE_CM) return;
 
-    // Start motor in correct direction
-    if (targetPulses > pulseCount) {
+    if (targetHeightCm > currentHeightCm) {
       startMovingUp();
       positionState->setVal(1);
     } else {
@@ -360,98 +281,79 @@ struct SmartSliderDeskControl : Service::WindowCovering {
       positionState->setVal(0);
     }
 
-    Serial.printf("[Move] %.1f -> %.1f cm\n", currentHeight, targetHeight);
+    Serial.printf("[Move] %.1f -> %.1f cm\n", currentHeightCm, targetHeightCm);
     if (!backlightOn) { lcd.backlight(); backlightOn = true; }
-    lcdShowTwoLines("Moving to:", String(targetHeight, 1) + " cm");
-    hasPendingTarget = false;
+    lcdShowTwoLines("Moving to:", String(targetHeightCm, 1) + " cm");
 
-    // ---- TIGHT DIAGNOSTIC LOOP ----
-    // Detach ISR so only this loop counts — avoids any double-counting.
-    detachInterrupt(digitalPinToInterrupt(HALL_SENSOR1_PIN));
-
-    int sensor1Prev  = digitalRead(HALL_SENSOR1_PIN);
-    int pulsesAtStart = pulseCount;
-    unsigned long startTime      = millis();
-    unsigned long lastLcdUpdate  = 0;
+    // ---- ToF MOVEMENT LOOP ----
+    unsigned long startTime       = millis();
+    unsigned long lastLcdUpdate   = 0;
     unsigned long lastSerialPrint = 0;
-    unsigned long localDebounce  = 0;
+    int failCount = 0;
 
     while (true) {
       unsigned long now = millis();
 
-      // Direct sensor read — no HomeSpan overhead
-      int s1 = digitalRead(HALL_SENSOR1_PIN);
-      if (s1 == HIGH && sensor1Prev == LOW) {           // rising edge
-        if (now - localDebounce > debounceDelay) {
-          if      (currentDir == DIR_UP)   pulseCount++;
-          else if (currentDir == DIR_DOWN) pulseCount--;
-          pulseCount = constrain(pulseCount, PULSES_AT_MIN_HEIGHT, PULSES_AT_MAX_HEIGHT);
-          localDebounce = now;
+      // Read current height from ToF
+      float h = readHeightNow();
+      if (h > 0 && h >= (MIN_HEIGHT_CM - 5.0) && h <= (MAX_HEIGHT_CM + 5.0)) {
+        currentHeightCm = constrain(h, MIN_HEIGHT_CM, MAX_HEIGHT_CM);
+        failCount = 0;
+      } else {
+        failCount++;
+        if (failCount >= MAX_TOF_FAILURES) {
+          Serial.printf("[ToF] %d consecutive failures — stopping for safety\n", failCount);
+          break;
         }
       }
-      sensor1Prev = s1;
 
-      // LCD every 300 ms
+      // LCD every 300ms
       if (now - lastLcdUpdate > 300) {
         char buf[16];
-        snprintf(buf, sizeof(buf), "%.1f->%.1f", pulsesToHeight(pulseCount), targetHeight);
+        snprintf(buf, sizeof(buf), "%.1f->%.1f", currentHeightCm, targetHeightCm);
         lcdShowTwoLines("Moving:", String(buf));
         lastLcdUpdate = now;
       }
 
-      // Serial every 1 s — shows live pulse count so we can see if sensor fires
+      // Serial every 1s
       if (now - lastSerialPrint > 1000) {
-        Serial.printf("[Pulse] %d pulses  %.1f cm  (counted %+d so far)\n",
-                      pulseCount, pulsesToHeight(pulseCount),
-                      pulseCount - pulsesAtStart);
+        Serial.printf("[Height] %.1f cm -> %.1f cm\n", currentHeightCm, targetHeightCm);
         lastSerialPrint = now;
       }
 
       // Target reached?
-      if (abs(pulseCount - targetPulses) <= ERROR_THRESHOLD) {
-        Serial.printf("[Done] %.1f cm (%d pulses, counted %d)\n",
-                      pulsesToHeight(pulseCount), pulseCount,
-                      abs(pulseCount - pulsesAtStart));
+      if (abs(currentHeightCm - targetHeightCm) <= HEIGHT_TOLERANCE_CM) {
+        Serial.printf("[Done] %.1f cm\n", currentHeightCm);
         break;
       }
 
       // Timeout?
       if (now - startTime > MOVEMENT_TIMEOUT) {
-        Serial.printf("[Timeout] %.1f cm (%d pulses, counted %d during move)\n",
-                      pulsesToHeight(pulseCount), pulseCount,
-                      abs(pulseCount - pulsesAtStart));
+        Serial.printf("[Timeout] %.1f cm\n", currentHeightCm);
         break;
       }
     }
-
-    // Re-attach interrupt for idle-time noise protection
-    attachInterrupt(digitalPinToInterrupt(HALL_SENSOR1_PIN), hallSensorISR, RISING);
 
     // Stop motor
     smoothStopMotor();
     positionState->setVal(2);
     lastMotorStopTime = millis();
 
-    // Calibrate and log drift between pulse count and ToF
-    int pulsesBefore = pulseCount;
+    // Final accurate calibration (averaged readings, desk settled)
     delay(500);
     calibrateWithTof();
-    int drift = pulseCount - pulsesBefore;
-    Serial.printf("[Drift] %+d pulses  (%.1f cm off)\n", drift, drift * CM_PER_PULSE);
 
     // Save and sync HomeKit
-    savePulseCount();
+    saveHeight();
     updateCurrentPosition();
     target->setVal(current->getVal());
-    lcdShowTwoLines("Height:", String(pulsesToHeight(pulseCount), 1) + " cm");
+    lcdShowTwoLines("Height:", String(currentHeightCm, 1) + " cm");
   }
 
   void updateCurrentPosition() {
-    float percentage = pulsesToPercentage(pulseCount);
-    if (percentage < 0) percentage = 0;
-    if (percentage > 100) percentage = 100;
-
-    current->setVal((int)percentage);
+    float pct = heightToPercentage(currentHeightCm);
+    pct = constrain(pct, 0.0f, 100.0f);
+    current->setVal((int)pct);
   }
 };
 
@@ -460,7 +362,7 @@ void setup() {
   Serial.begin(115200);
   delay(2000);
 
-  Serial.printf("[Boot] Desk Controller v3.1\n");
+  Serial.printf("[Boot] Desk Controller v3.2\n");
 
   // Initialize storage
   initStorage();
@@ -476,38 +378,25 @@ void setup() {
   // Initialize ToF sensor
   initToFSensor();
 
-  // Load saved position
-  loadPulseCount();
-
-  // Fix negative pulse count
-  if (pulseCount < 0) {
-    pulseCount = 0;
-    savePulseCount();
-    Serial.printf("[Init] Fixed negative pulse count\n");
-  }
+  // Load last known height (overridden by live ToF below)
+  loadHeight();
 
   // Initialize motor control
   initMotorControl();
 
-  // Initialize hall sensors
-  initHallSensors();
-
-  // Initial calibration
+  // Live calibration on boot
   delay(1000);
   calibrateWithTof();
 
-  // Show initial height
-  float initialHeight = pulsesToHeight(pulseCount);
-  Serial.printf("[Init] Height: %.1f cm (%d pulses)\n", initialHeight, pulseCount);
+  Serial.printf("[Init] Height: %.1f cm\n", currentHeightCm);
 
   // Connect to WiFi
   delay(2000);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   Serial.printf("[Init] Connecting to WiFi...\n");
-  // More robust WiFi connection
   WiFi.persistent(true);
   WiFi.setAutoReconnect(true);
-  delay(2000); // Give more time for WiFi to stabilize
+  delay(2000);
 
   int attempts = 0;
   while (WiFi.status() != WL_CONNECTED && attempts < 20) {
@@ -520,14 +409,9 @@ void setup() {
     Serial.printf("[Init] WiFi connected\n");
   } else {
     Serial.printf("[Init] WiFi FAILED\n");
-
-    // Show failure on LCD
     lcdShowTwoLines("WiFi FAILED!", "Check Router");
-
-    // Keep showing error (don't continue setup)
-    while(true) {
+    while (true) {
       delay(1000);
-      // Blink the display to draw attention
       lcd.noBacklight();
       delay(500);
       lcd.backlight();
@@ -536,7 +420,6 @@ void setup() {
   }
 
   delay(2000);
-  // Initialize HomeSpan
   Serial.printf("[Init] HomeSpan...\n");
   homeSpan.setLogLevel(0);
   homeSpan.enableOTA();
@@ -544,20 +427,18 @@ void setup() {
   delay(2000);
   homeSpan.begin(Category::WindowCoverings, "Smart Desk");
 
-  // Create HomeKit accessory
   new SpanAccessory();
     new Service::AccessoryInformation();
       new Characteristic::Identify();
       new Characteristic::Manufacturer("DIY");
       new Characteristic::Model("Smart Standing Desk");
       new Characteristic::SerialNumber("SMART-001");
-      new Characteristic::FirmwareRevision("3.1");
+      new Characteristic::FirmwareRevision("3.2");
     new SmartSliderDeskControl();
 
-  // Final LCD update
-  lcdShowTwoLines("HomeKit Ready", String(initialHeight, 1) + " cm");
+  lcdShowTwoLines("HomeKit Ready", String(currentHeightCm, 1) + " cm");
 
-  // Start backlight timeout from boot — no need to wait for first movement
+  // Start backlight timeout from boot
   lastMotorStopTime = millis();
 
   Serial.printf("[Boot] Ready. Pairing: 466-37-726\n");
@@ -578,7 +459,7 @@ void loop() {
   // Status heartbeat every 30 seconds when idle
   static unsigned long lastHeartbeat = 0;
   if (currentState == IDLE && millis() - lastHeartbeat > 30000) {
-    Serial.printf("[Idle] %.1f cm\n", pulsesToHeight(pulseCount));
+    Serial.printf("[Idle] %.1f cm\n", currentHeightCm);
     lastHeartbeat = millis();
   }
 }
