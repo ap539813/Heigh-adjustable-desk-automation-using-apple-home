@@ -125,11 +125,18 @@ bool initToFSensor() {
   return success;
 }
 
-// Single fast read — used inside the movement loop
+// Averaged fast read — 3 samples reduce vibration noise during movement
 float readHeightNow() {
-  uint16_t dist_mm = tof.readRangeContinuousMillimeters();
-  if (tof.timeoutOccurred()) return -1;
-  return dist_mm / 10.0f;
+  float total = 0;
+  int   valid = 0;
+  for (int i = 0; i < 3; i++) {
+    uint16_t dist_mm = tof.readRangeContinuousMillimeters();
+    if (!tof.timeoutOccurred()) {
+      total += dist_mm / 10.0f;
+      valid++;
+    }
+  }
+  return (valid > 0) ? total / valid : -1;
 }
 
 // Averaged read — used for accurate post-move calibration
@@ -289,7 +296,8 @@ struct SmartSliderDeskControl : Service::WindowCovering {
     unsigned long startTime       = millis();
     unsigned long lastLcdUpdate   = 0;
     unsigned long lastSerialPrint = 0;
-    int failCount = 0;
+    int failCount  = 0;
+    int doneCount  = 0; // consecutive readings within tolerance required to stop
 
     while (true) {
       unsigned long now = millis();
@@ -321,10 +329,16 @@ struct SmartSliderDeskControl : Service::WindowCovering {
         lastSerialPrint = now;
       }
 
-      // Target reached?
+      // Target reached? Require 3 consecutive readings within tolerance
+      // so a single noise spike can never trigger an early stop.
       if (abs(currentHeightCm - targetHeightCm) <= HEIGHT_TOLERANCE_CM) {
-        Serial.printf("[Done] %.1f cm\n", currentHeightCm);
-        break;
+        doneCount++;
+        if (doneCount >= 3) {
+          Serial.printf("[Done] %.1f cm\n", currentHeightCm);
+          break;
+        }
+      } else {
+        doneCount = 0;
       }
 
       // Timeout?
