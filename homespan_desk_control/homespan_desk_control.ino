@@ -12,8 +12,12 @@
 #include <HomeSpan.h>
 #include <LiquidCrystal_I2C.h>
 #include <VL53L0X.h>
+#include <WebServer.h>
 #include <WiFi.h>
 #include <Wire.h>
+
+// Web server for REST API (port 8080 — port 80 is used by HomeSpan HAP)
+WebServer webServer(8080);
 
 // ===== CONFIGURATION =====
 const char *WIFI_SSID = "A-19_4G";
@@ -382,6 +386,140 @@ struct SmartSliderDeskControl : Service::WindowCovering {
   }
 };
 
+// ===== WEB SERVER API =====
+void sendCorsHeaders() {
+  webServer.sendHeader("Access-Control-Allow-Origin", "*");
+  webServer.sendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  webServer.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+}
+
+void handleApiStatus() {
+  sendCorsHeaders();
+  float pct = heightToPercentage(currentHeightCm);
+  float targetPct = heightToPercentage(targetHeightCm);
+  const char *stateStr = (currentState == IDLE) ? "idle" : "moving";
+  const char *dirStr = (currentDir == DIR_UP)     ? "up"
+                     : (currentDir == DIR_DOWN)   ? "down"
+                                                  : "none";
+
+  char json[256];
+  snprintf(json, sizeof(json),
+    "{\"height_cm\":%.1f,\"height_pct\":%d,"
+    "\"target_cm\":%.1f,\"target_pct\":%d,"
+    "\"state\":\"%s\",\"direction\":\"%s\","
+    "\"wifi_rssi\":%d,\"uptime_s\":%lu}",
+    currentHeightCm, (int)constrain(pct, 0, 100),
+    targetHeightCm, (int)constrain(targetPct, 0, 100),
+    stateStr, dirStr,
+    WiFi.RSSI(), millis() / 1000);
+
+  webServer.send(200, "application/json", json);
+  Serial.printf("[API] GET /api/status\n");
+}
+
+void handleApiMove() {
+  sendCorsHeaders();
+
+  if (currentState != IDLE) {
+    webServer.send(409, "application/json",
+      "{\"ok\":false,\"message\":\"Desk is already moving\"}");
+    return;
+  }
+
+  float newTargetCm = -1;
+
+  if (webServer.hasArg("height_cm")) {
+    newTargetCm = webServer.arg("height_cm").toFloat();
+  } else if (webServer.hasArg("height_pct")) {
+    float pct = webServer.arg("height_pct").toFloat();
+    newTargetCm = percentageToHeight(constrain(pct, 0, 100));
+  } else {
+    webServer.send(400, "application/json",
+      "{\"ok\":false,\"message\":\"Provide height_cm or height_pct\"}");
+    return;
+  }
+
+  newTargetCm = constrain(newTargetCm, MIN_HEIGHT_CM, MAX_HEIGHT_CM);
+  int targetPct = (int)constrain(heightToPercentage(newTargetCm), 0, 100);
+
+  // Trigger movement via HomeKit service (keeps everything in sync)
+  if (deskControl) {
+    deskControl->target->setVal(targetPct);
+    deskControl->pendingTargetPercent = targetPct;
+    deskControl->hasPendingTarget = true;
+    lastSliderChangeTime = millis();
+  }
+
+  char json[128];
+  snprintf(json, sizeof(json),
+    "{\"ok\":true,\"message\":\"Moving to %.1f cm\","
+    "\"target_cm\":%.1f,\"target_pct\":%d}",
+    newTargetCm, newTargetCm, targetPct);
+
+  webServer.send(200, "application/json", json);
+  Serial.printf("[API] POST /api/move -> %.1f cm (%d%%)\n", newTargetCm, targetPct);
+}
+
+void handleApiStop() {
+  sendCorsHeaders();
+
+  smoothStopMotor();
+  currentState = IDLE;
+  if (deskControl) {
+    deskControl->hasPendingTarget = false;
+    deskControl->positionState->setVal(2); // Stopped
+    deskControl->updateCurrentPosition();
+    deskControl->target->setVal(deskControl->current->getVal());
+  }
+
+  char json[96];
+  snprintf(json, sizeof(json),
+    "{\"ok\":true,\"message\":\"Emergency stop executed\","
+    "\"height_cm\":%.1f}", currentHeightCm);
+
+  webServer.send(200, "application/json", json);
+  Serial.printf("[API] POST /api/stop\n");
+}
+
+void handleApiConfig() {
+  sendCorsHeaders();
+
+  char json[192];
+  snprintf(json, sizeof(json),
+    "{\"min_height_cm\":%.1f,\"max_height_cm\":%.1f,"
+    "\"tolerance_cm\":%.1f,\"firmware_version\":\"3.2\","
+    "\"ip\":\"%s\",\"mac\":\"%s\"}",
+    MIN_HEIGHT_CM, MAX_HEIGHT_CM, HEIGHT_TOLERANCE_CM,
+    WiFi.localIP().toString().c_str(),
+    WiFi.macAddress().c_str());
+
+  webServer.send(200, "application/json", json);
+  Serial.printf("[API] GET /api/config\n");
+}
+
+void handleCorsOptions() {
+  sendCorsHeaders();
+  webServer.send(204);
+}
+
+void setupWebServer() {
+  webServer.on("/api/status", HTTP_GET, handleApiStatus);
+  webServer.on("/api/move", HTTP_POST, handleApiMove);
+  webServer.on("/api/stop", HTTP_POST, handleApiStop);
+  webServer.on("/api/config", HTTP_GET, handleApiConfig);
+
+  // Handle CORS preflight for all /api/ routes
+  webServer.on("/api/status", HTTP_OPTIONS, handleCorsOptions);
+  webServer.on("/api/move", HTTP_OPTIONS, handleCorsOptions);
+  webServer.on("/api/stop", HTTP_OPTIONS, handleCorsOptions);
+  webServer.on("/api/config", HTTP_OPTIONS, handleCorsOptions);
+
+  webServer.begin();
+  Serial.printf("[Init] Web API server started on port 8080\n");
+  Serial.printf("[Init] API: http://%s:8080/api/status\n",
+    WiFi.localIP().toString().c_str());
+}
+
 // ===== MAIN SETUP =====
 void setup() {
   Serial.begin(115200);
@@ -488,6 +626,9 @@ void setup() {
   new Characteristic::FirmwareRevision("3.2");
   new SmartSliderDeskControl();
 
+  // Start web API server (WiFi is already connected at this point)
+  setupWebServer();
+
   lcdShowTwoLines("HomeKit Ready", String(currentHeightCm, 1) + " cm");
 
   // Start backlight timeout from boot
@@ -499,6 +640,7 @@ void setup() {
 // ===== MAIN LOOP =====
 void loop() {
   homeSpan.poll();
+  webServer.handleClient();
 
   // LCD backlight timeout
   if (backlightOn && currentState == IDLE && lastMotorStopTime > 0) {
