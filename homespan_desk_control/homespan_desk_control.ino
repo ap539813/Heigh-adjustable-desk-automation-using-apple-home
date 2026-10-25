@@ -33,6 +33,11 @@ const uint8_t L_EN_PIN = 26;
 const uint8_t R_PWM_PIN = 14;
 const uint8_t L_PWM_PIN = 27;
 
+// Physical button pins (active LOW — wire button between pin and GND)
+const uint8_t BTN_UP_PIN   = 16;  // P16 — press-and-hold to go up
+const uint8_t BTN_DOWN_PIN = 17;  // P17 — press-and-hold to go down
+const unsigned long BTN_DEBOUNCE_MS = 50;
+
 // Height range
 const float MIN_HEIGHT_CM = 69.0;
 const float MAX_HEIGHT_CM = 107.0;
@@ -59,7 +64,7 @@ const unsigned long MOVEMENT_TIMEOUT = 15000;
 const unsigned long SLIDER_DEBOUNCE_TIME = 1000;
 
 // Movement states
-enum MovementState { IDLE, MOVING_TO_TARGET };
+enum MovementState { IDLE, MOVING_TO_TARGET, MANUAL_MOVING };
 enum Direction { DIR_NONE = 0, DIR_UP = 1, DIR_DOWN = -1 };
 
 // ===== GLOBAL VARIABLES =====
@@ -70,6 +75,13 @@ float targetHeightCm = MIN_HEIGHT_CM;
 unsigned long lastSliderChangeTime = 0;
 bool backlightOn = true;
 unsigned long lastMotorStopTime = 0;
+
+// Button state tracking
+bool btnUpPrev  = false;   // previous debounced state
+bool btnDownPrev = false;
+unsigned long btnUpLastChange  = 0;
+unsigned long btnDownLastChange = 0;
+unsigned long lastManualLcdUpdate = 0;
 
 // I²C devices
 VL53L0X tof;
@@ -399,19 +411,18 @@ void handleApiStatus() {
   float targetPct = heightToPercentage(targetHeightCm);
   const char *stateStr = (currentState == IDLE) ? "idle" : "moving";
   const char *dirStr = (currentDir == DIR_UP)     ? "up"
-                     : (currentDir == DIR_DOWN)   ? "down"
+                       : (currentDir == DIR_DOWN) ? "down"
                                                   : "none";
 
   char json[256];
   snprintf(json, sizeof(json),
-    "{\"height_cm\":%.1f,\"height_pct\":%d,"
-    "\"target_cm\":%.1f,\"target_pct\":%d,"
-    "\"state\":\"%s\",\"direction\":\"%s\","
-    "\"wifi_rssi\":%d,\"uptime_s\":%lu}",
-    currentHeightCm, (int)constrain(pct, 0, 100),
-    targetHeightCm, (int)constrain(targetPct, 0, 100),
-    stateStr, dirStr,
-    WiFi.RSSI(), millis() / 1000);
+           "{\"height_cm\":%.1f,\"height_pct\":%d,"
+           "\"target_cm\":%.1f,\"target_pct\":%d,"
+           "\"state\":\"%s\",\"direction\":\"%s\","
+           "\"wifi_rssi\":%d,\"uptime_s\":%lu}",
+           currentHeightCm, (int)constrain(pct, 0, 100), targetHeightCm,
+           (int)constrain(targetPct, 0, 100), stateStr, dirStr, WiFi.RSSI(),
+           millis() / 1000);
 
   webServer.send(200, "application/json", json);
   Serial.printf("[API] GET /api/status\n");
@@ -422,7 +433,7 @@ void handleApiMove() {
 
   if (currentState != IDLE) {
     webServer.send(409, "application/json",
-      "{\"ok\":false,\"message\":\"Desk is already moving\"}");
+                   "{\"ok\":false,\"message\":\"Desk is already moving\"}");
     return;
   }
 
@@ -434,8 +445,9 @@ void handleApiMove() {
     float pct = webServer.arg("height_pct").toFloat();
     newTargetCm = percentageToHeight(constrain(pct, 0, 100));
   } else {
-    webServer.send(400, "application/json",
-      "{\"ok\":false,\"message\":\"Provide height_cm or height_pct\"}");
+    webServer.send(
+        400, "application/json",
+        "{\"ok\":false,\"message\":\"Provide height_cm or height_pct\"}");
     return;
   }
 
@@ -452,12 +464,13 @@ void handleApiMove() {
 
   char json[128];
   snprintf(json, sizeof(json),
-    "{\"ok\":true,\"message\":\"Moving to %.1f cm\","
-    "\"target_cm\":%.1f,\"target_pct\":%d}",
-    newTargetCm, newTargetCm, targetPct);
+           "{\"ok\":true,\"message\":\"Moving to %.1f cm\","
+           "\"target_cm\":%.1f,\"target_pct\":%d}",
+           newTargetCm, newTargetCm, targetPct);
 
   webServer.send(200, "application/json", json);
-  Serial.printf("[API] POST /api/move -> %.1f cm (%d%%)\n", newTargetCm, targetPct);
+  Serial.printf("[API] POST /api/move -> %.1f cm (%d%%)\n", newTargetCm,
+                targetPct);
 }
 
 void handleApiStop() {
@@ -474,8 +487,9 @@ void handleApiStop() {
 
   char json[96];
   snprintf(json, sizeof(json),
-    "{\"ok\":true,\"message\":\"Emergency stop executed\","
-    "\"height_cm\":%.1f}", currentHeightCm);
+           "{\"ok\":true,\"message\":\"Emergency stop executed\","
+           "\"height_cm\":%.1f}",
+           currentHeightCm);
 
   webServer.send(200, "application/json", json);
   Serial.printf("[API] POST /api/stop\n");
@@ -486,12 +500,11 @@ void handleApiConfig() {
 
   char json[192];
   snprintf(json, sizeof(json),
-    "{\"min_height_cm\":%.1f,\"max_height_cm\":%.1f,"
-    "\"tolerance_cm\":%.1f,\"firmware_version\":\"3.2\","
-    "\"ip\":\"%s\",\"mac\":\"%s\"}",
-    MIN_HEIGHT_CM, MAX_HEIGHT_CM, HEIGHT_TOLERANCE_CM,
-    WiFi.localIP().toString().c_str(),
-    WiFi.macAddress().c_str());
+           "{\"min_height_cm\":%.1f,\"max_height_cm\":%.1f,"
+           "\"tolerance_cm\":%.1f,\"firmware_version\":\"3.2\","
+           "\"ip\":\"%s\",\"mac\":\"%s\"}",
+           MIN_HEIGHT_CM, MAX_HEIGHT_CM, HEIGHT_TOLERANCE_CM,
+           WiFi.localIP().toString().c_str(), WiFi.macAddress().c_str());
 
   webServer.send(200, "application/json", json);
   Serial.printf("[API] GET /api/config\n");
@@ -517,7 +530,7 @@ void setupWebServer() {
   webServer.begin();
   Serial.printf("[Init] Web API server started on port 8080\n");
   Serial.printf("[Init] API: http://%s:8080/api/status\n",
-    WiFi.localIP().toString().c_str());
+                WiFi.localIP().toString().c_str());
 }
 
 // ===== MAIN SETUP =====
@@ -546,6 +559,11 @@ void setup() {
 
   // Initialize motor control
   initMotorControl();
+
+  // Initialize physical buttons (internal pull-ups)
+  pinMode(BTN_UP_PIN, INPUT_PULLUP);
+  pinMode(BTN_DOWN_PIN, INPUT_PULLUP);
+  Serial.printf("[Init] Buttons ready (UP=GPIO%d, DOWN=GPIO%d)\n", BTN_UP_PIN, BTN_DOWN_PIN);
 
   // Live calibration on boot
   delay(1000);
@@ -637,10 +655,152 @@ void setup() {
   Serial.printf("[Boot] Ready. Pairing: 466-37-726\n");
 }
 
+// ===== BUTTON HELPERS =====
+
+// Debounced read: returns true if button is pressed (active LOW)
+bool readButtonDebounced(uint8_t pin, bool &prevState, unsigned long &lastChange) {
+  bool raw = (digitalRead(pin) == LOW);
+  unsigned long now = millis();
+  if (raw != prevState && (now - lastChange) >= BTN_DEBOUNCE_MS) {
+    prevState = raw;
+    lastChange = now;
+  }
+  return prevState;
+}
+
+// Emergency-cancel any HomeKit-driven move in progress
+void cancelHomeKitMove() {
+  Serial.printf("[Btn] Overriding HomeKit move — stopping motor\n");
+  smoothStopMotor();
+  currentState = IDLE;
+  if (deskControl) {
+    deskControl->hasPendingTarget = false;
+    deskControl->positionState->setVal(2); // Stopped
+    calibrateWithTof();
+    saveHeight();
+    deskControl->updateCurrentPosition();
+    deskControl->target->setVal(deskControl->current->getVal());
+  }
+  Serial.printf("[Btn] HomeKit move cancelled at %.1f cm\n", currentHeightCm);
+}
+
+// Sync HomeKit after a manual move ends
+void syncHomeKitAfterManual() {
+  delay(300);
+  calibrateWithTof();
+  saveHeight();
+  if (deskControl) {
+    deskControl->updateCurrentPosition();
+    deskControl->target->setVal(deskControl->current->getVal());
+  }
+  lcdShowTwoLines("Height:", String(currentHeightCm, 1) + " cm");
+  lastMotorStopTime = millis();
+  Serial.printf("[Btn] HomeKit synced to %.1f cm\n", currentHeightCm);
+}
+
 // ===== MAIN LOOP =====
 void loop() {
   homeSpan.poll();
   webServer.handleClient();
+
+  // --- Physical button handling ---
+  bool upNow   = readButtonDebounced(BTN_UP_PIN,   btnUpPrev,   btnUpLastChange);
+  bool downNow = readButtonDebounced(BTN_DOWN_PIN, btnDownPrev, btnDownLastChange);
+
+  // Both pressed = safety stop
+  if (upNow && downNow) {
+    if (currentState == MANUAL_MOVING) {
+      Serial.printf("[Btn] BOTH pressed — emergency stop!\n");
+      smoothStopMotor();
+      currentState = IDLE;
+      syncHomeKitAfterManual();
+    }
+  }
+  // UP button held (and not both)
+  else if (upNow && !downNow) {
+    // If a HomeKit move is running, cancel it first
+    if (currentState == MOVING_TO_TARGET) {
+      cancelHomeKitMove();
+    }
+
+    if (currentState != MANUAL_MOVING) {
+      // Check upper limit before starting
+      if (currentHeightCm >= MAX_HEIGHT_CM) {
+        Serial.printf("[Btn] UP pressed but already at max (%.1f cm)\n", currentHeightCm);
+      } else {
+        currentState = MANUAL_MOVING;
+        startMovingUp();
+        if (!backlightOn) { lcd.backlight(); backlightOn = true; }
+        lcdShowTwoLines("Manual UP", String(currentHeightCm, 1) + " cm");
+        Serial.printf("[Btn] UP pressed — moving up from %.1f cm\n", currentHeightCm);
+      }
+    } else if (currentDir == DIR_UP) {
+      // Still held — read ToF and enforce upper limit
+      float h = readHeightNow();
+      if (h > 0 && h >= (MIN_HEIGHT_CM - 5.0) && h <= (MAX_HEIGHT_CM + 5.0)) {
+        currentHeightCm = constrain(h, MIN_HEIGHT_CM, MAX_HEIGHT_CM);
+      }
+      if (currentHeightCm >= MAX_HEIGHT_CM) {
+        Serial.printf("[Btn] Upper limit reached (%.1f cm) — stopping\n", currentHeightCm);
+        smoothStopMotor();
+        currentState = IDLE;
+        syncHomeKitAfterManual();
+      } else {
+        // Update LCD periodically
+        unsigned long now = millis();
+        if (now - lastManualLcdUpdate > 300) {
+          lcdShowTwoLines("Manual UP", String(currentHeightCm, 1) + " cm");
+          Serial.printf("[Btn] UP holding — %.1f cm\n", currentHeightCm);
+          lastManualLcdUpdate = now;
+        }
+      }
+    }
+  }
+  // DOWN button held (and not both)
+  else if (downNow && !upNow) {
+    if (currentState == MOVING_TO_TARGET) {
+      cancelHomeKitMove();
+    }
+
+    if (currentState != MANUAL_MOVING) {
+      if (currentHeightCm <= MIN_HEIGHT_CM) {
+        Serial.printf("[Btn] DOWN pressed but already at min (%.1f cm)\n", currentHeightCm);
+      } else {
+        currentState = MANUAL_MOVING;
+        startMovingDown();
+        if (!backlightOn) { lcd.backlight(); backlightOn = true; }
+        lcdShowTwoLines("Manual DOWN", String(currentHeightCm, 1) + " cm");
+        Serial.printf("[Btn] DOWN pressed — moving down from %.1f cm\n", currentHeightCm);
+      }
+    } else if (currentDir == DIR_DOWN) {
+      float h = readHeightNow();
+      if (h > 0 && h >= (MIN_HEIGHT_CM - 5.0) && h <= (MAX_HEIGHT_CM + 5.0)) {
+        currentHeightCm = constrain(h, MIN_HEIGHT_CM, MAX_HEIGHT_CM);
+      }
+      if (currentHeightCm <= MIN_HEIGHT_CM) {
+        Serial.printf("[Btn] Lower limit reached (%.1f cm) — stopping\n", currentHeightCm);
+        smoothStopMotor();
+        currentState = IDLE;
+        syncHomeKitAfterManual();
+      } else {
+        unsigned long now = millis();
+        if (now - lastManualLcdUpdate > 300) {
+          lcdShowTwoLines("Manual DOWN", String(currentHeightCm, 1) + " cm");
+          Serial.printf("[Btn] DOWN holding — %.1f cm\n", currentHeightCm);
+          lastManualLcdUpdate = now;
+        }
+      }
+    }
+  }
+  // No button pressed
+  else {
+    if (currentState == MANUAL_MOVING) {
+      Serial.printf("[Btn] Released — stopping at %.1f cm\n", currentHeightCm);
+      smoothStopMotor();
+      currentState = IDLE;
+      syncHomeKitAfterManual();
+    }
+  }
 
   // LCD backlight timeout
   if (backlightOn && currentState == IDLE && lastMotorStopTime > 0) {
